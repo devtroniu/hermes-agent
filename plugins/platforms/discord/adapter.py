@@ -183,6 +183,27 @@ def _t_discord(key: str, limit: int, **kwargs: Any) -> str:
     return _truncate_discord_component_text(t(key, **kwargs), limit)
 
 
+def _parse_slash_command_scope(value: Any) -> tuple[bool, Optional[frozenset]]:
+    """Parse ``slash_commands`` into ``(enabled, allowlist)``.
+
+    ``True`` registers every command (``allowlist`` None), ``False`` registers none, and a list of
+    command names registers only those — the shape a firm-facing bot needs, where the operator
+    surface (``/model``, ``/restart``, ``/update``, ``/reload-mcp``) must not be reachable by
+    members. Names compare case-insensitively against the Discord command name. An empty list (or
+    a list with no usable names) means "none", not "all": a mis-parsed allowlist must fail closed.
+    """
+    if isinstance(value, str):
+        names = [part.strip().lower() for part in value.split(",")]
+        names = [name for name in names if name]
+        return (bool(names), frozenset(names) if names else None)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        names = {str(item).strip().lower() for item in value if str(item).strip()}
+        if not names:
+            return (False, None)
+        return (True, frozenset(names))
+    return (bool(value), None)
+
+
 def _native_slash_commands() -> tuple:
     """``_NATIVE_SLASH_COMMAND_SPECS`` with descriptions, parameter descriptions and Choice names
     resolved for the active language: ``(name, description, args, template, followup_key)``.
@@ -1375,7 +1396,10 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         self._dedup = MessageDeduplicator()
         # Reply threading mode: "off", "first" (default; first chunk only), "all" (every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
-        self._slash_commands: bool = self.config.extra.get("slash_commands", True)
+        # ``slash_commands``: True (all), False (none), or a list of names (allowlist).
+        self._slash_commands, self._slash_command_allow = _parse_slash_command_scope(
+            self.config.extra.get("slash_commands", True)
+        )
         # Bot's last message ID per channel: lets history backfill skip the full channel.history() scan.
         self._last_self_message_id: dict[str, str] = {}
         # Bot-authored lifecycle/status message IDs that must not bound history after restart.
@@ -4622,7 +4646,10 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         if not self._client:
             return
         tree = self._client.tree
+        allow = self._slash_command_allow
         for name, description, args, template, followup in _native_slash_commands():
+            if allow is not None and name.lower() not in allow:
+                continue
             if template is None:
                 self._register_thread_slash(tree, name, description)
                 continue
@@ -4639,6 +4666,8 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
             nonlocal dropped_over_cap
             # Discord command names: lowercase, hyphens OK, max 32 chars.
             discord_name = name.lower()[:32]
+            if allow is not None and discord_name not in allow:
+                return
             if discord_name in already_registered:
                 return
             if len(already_registered) >= slot_cap:
@@ -4736,6 +4765,10 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         and ``tree.sync()`` rejected the entire slash-command batch (issues 11321, #10259, #11385, #10261,
         #10214).
         """
+        # With an allowlist, ``/skill`` (a browsable catalog of the operator's skills) is registered
+        # only when the operator names it: a firm-facing allowlist must not leak the skill tree.
+        if self._slash_command_allow is not None and "skill" not in self._slash_command_allow:
+            return
         try:
             existing_names = set()
             try:
@@ -7378,6 +7411,12 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     backfill_cfg = discord_cfg.get("missed_message_backfill")
     if isinstance(backfill_cfg, dict):
         seeded_extra["missed_message_backfill"] = dict(backfill_cfg)
+    # slash_commands: True (all) / False (none) / a name list (allowlist). Passed through with its
+    # own type — the adapter parses list vs bool — so no env mirror (a CSV env var would coerce).
+    if "slash_commands" in discord_cfg:
+        seeded_extra["slash_commands"] = discord_cfg["slash_commands"]
+    elif "slash_commands" in platform_extra_cfg:
+        seeded_extra["slash_commands"] = platform_extra_cfg["slash_commands"]
     _gate("ignored_channels", "DISCORD_IGNORED_CHANNELS", from_platform_extra=False)
     _gate("allowed_channels", "DISCORD_ALLOWED_CHANNELS", from_platform_extra=False)
     _gate("no_thread_channels", "DISCORD_NO_THREAD_CHANNELS", from_platform_extra=False)

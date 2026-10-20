@@ -644,3 +644,72 @@ def test_build_slash_event_routes_guild_profile_like_messages(adapter, monkeypat
     assert thread_event.source.guild_id == "1"
     assert thread_event.source.parent_chat_id == "100"
     assert thread_event.source.profile == "work"
+
+
+# ------------------------------------------------------------------
+# slash_commands allowlist: firm-facing bots register only named commands
+# ------------------------------------------------------------------
+
+
+def _allowlisted_adapter(names):
+    config = PlatformConfig(enabled=True, token="***", extra={"slash_commands": names})
+    adapter = DiscordAdapter(config)
+    adapter._client = SimpleNamespace(
+        tree=FakeTree(),
+        get_channel=lambda _id: None,
+        fetch_channel=AsyncMock(),
+        user=SimpleNamespace(id=99999, name="HermesBot"),
+    )
+    adapter._text_batch_delay_seconds = 0
+    adapter._check_slash_authorization = AsyncMock(return_value=True)
+    return adapter
+
+
+MEMBER_SET = ["new", "title", "stop", "retry", "help"]
+
+
+def test_allowlist_registers_only_listed_commands():
+    """Native loop AND the COMMAND_REGISTRY auto-registration loop both honour the allowlist."""
+    adapter = _allowlisted_adapter(MEMBER_SET)
+    adapter._register_slash_commands()
+    registered = set(adapter._client.tree.commands)
+
+    # /help and /retry are natives; /title is a native too. All five must be present.
+    assert set(MEMBER_SET) <= registered
+    # Operator surface must be absent — neither native nor auto-registered.
+    assert not registered & {"model", "reasoning", "restart", "update", "reload-mcp", "plan", "approve", "skill"}
+
+
+def test_allowlist_absent_keeps_every_command():
+    """Default (True) still registers the operator surface — the allowlist is opt-in."""
+    adapter = _allowlisted_adapter(True)
+    adapter._register_slash_commands()
+    registered = set(adapter._client.tree.commands)
+    assert {"model", "restart", "update", "status"} <= registered
+
+
+def test_empty_allowlist_disables_slash_commands():
+    """An empty or unusable list fails closed instead of opening every command."""
+    for value in ([], ["", "  "], ""):
+        adapter = _allowlisted_adapter(value)
+        assert adapter._slash_commands is False
+
+
+def test_parse_slash_command_scope_shapes():
+    from plugins.platforms.discord.adapter import _parse_slash_command_scope
+
+    assert _parse_slash_command_scope(True) == (True, None)
+    assert _parse_slash_command_scope(False) == (False, None)
+    assert _parse_slash_command_scope(["New", " title "]) == (True, frozenset({"new", "title"}))
+    assert _parse_slash_command_scope("new,title") == (True, frozenset({"new", "title"}))
+
+
+def test_yaml_bridge_seeds_slash_command_allowlist():
+    """``platforms.discord.extra.slash_commands`` (and the top-level ``discord:`` form) reach extra."""
+    from plugins.platforms.discord.adapter import _apply_yaml_config
+
+    nested = _apply_yaml_config({"platforms": {"discord": {"extra": {"slash_commands": MEMBER_SET}}}}, {})
+    assert nested["slash_commands"] == MEMBER_SET
+
+    top = _apply_yaml_config({}, {"slash_commands": False})
+    assert top["slash_commands"] is False
