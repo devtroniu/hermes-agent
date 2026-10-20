@@ -728,6 +728,23 @@ gateway:
 
 Leaving this at `true` on the "primary" gateway keeps the normal behavior — global `/`-menu commands for built-ins and installed skills.
 
+`slash_commands` also takes a **list of command names**, which registers only those — the shape a
+member-facing bot needs, where the operator surface (`/model`, `/restart`, `/update`, `/reload-mcp`,
+`/insights`, `/skill`) must not be reachable by the people in the channel:
+
+```yaml
+gateway:
+  platforms:
+    discord:
+      extra:
+        slash_commands: [new, title, stop, retry, help]
+```
+
+Names are the Discord command names (lowercased; `/reload-mcp` is `reload-mcp`). The allowlist gates
+every registration path at once — the built-in commands, the auto-registered command registry and
+installed skills — and `skill` must be named explicitly to keep `/skill`. An empty list registers
+nothing (it fails closed rather than falling back to "all").
+
 ## Sending Media (inline `MEDIA:` tags)
 
 The Discord adapter supports native file uploads for every common media type via inline `MEDIA:/path/to/file` tags emitted in the agent's response — the adapter strips the tag and auto-uploads the file:
